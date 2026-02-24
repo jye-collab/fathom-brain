@@ -1,0 +1,22 @@
+{
+  "name": "fathom-brain",
+  "version": "1.0.0",
+  "description": "Your second brain — powered by Fathom meeting transcripts + Claude",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "backfill": "node src/backfill.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@slack/bolt": "^4.1.0",
+    "@supabase/supabase-js": "^2.47.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0",
+    "openai": "^4.77.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
