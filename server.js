@@ -7,145 +7,158 @@ process.on('unhandledRejection', (reason) => {
   console.error('UNHANDLED REJECTION:', reason);
 });
 process.on('SIGTERM', () => {
-  console.error('>>> RECEIVED SIGTERM — Railway is restarting this container (new deploy or health check)');
-  process.exit(0);
-});
-process.on('SIGINT', () => {
-  console.error('>>> RECEIVED SIGINT');
+  console.error('>>> RECEIVED SIGTERM — Railway is restarting this container');
   process.exit(0);
 });
 
 import express from 'express';
-import { startSlackBot } from './src/slack-bot.js';
-import { createWebhookRouter } from './src/webhook.js';
-import { ingestMeeting } from './src/ingest.js';
-import { generateEmbedding } from './src/embeddings.js';
-import { config } from './src/config.js';
-import { supabase } from './src/supabase.js';
 
-const app = express();
+var BACKFILL_MODE = process.env.BACKFILL_MODE === '1';
+var PORT = parseInt(process.env.PORT || '3000', 10);
+
+var app = express();
 app.use(express.json({ limit: '10mb' }));
-app.use('/webhook', createWebhookRouter());
 
 app.get('/', (req, res) => {
-    res.json({ name: 'Fathom Brain', status: 'running' });
+    res.json({ name: 'Fathom Brain', status: 'running', mode: BACKFILL_MODE ? 'backfill' : 'normal' });
 });
 
-// Health check for Railway
 app.get('/health', (req, res) => {
     res.json({ ok: true });
 });
 
-// Test OpenAI embedding
-app.get('/test-embed', async (req, res) => {
+async function runBackfill() {
+  var { config } = await import('./src/config.js');
+  var { supabase } = await import('./src/supabase.js');
+  var { ingestMeeting } = await import('./src/ingest.js');
+
+  // Clean up NULL rows
+  var { error: cleanErr } = await supabase.from('meetings').delete().is('fathom_call_id', null);
+  if (cleanErr) console.error('Cleanup error:', cleanErr.message);
+  else console.log('Cleaned up NULL fathom_call_id rows');
+
+  var FATHOM_BASE = 'https://api.fathom.ai/external/v1';
+  var headers = { 'X-Api-Key': config.fathom.apiKey, 'Content-Type': 'application/json' };
+
+  // Fetch ALL meetings with pagination
+  var allCalls = [];
+  var cursor = null;
+  var page = 1;
+  while (true) {
+    var url = FATHOM_BASE + '/meetings';
+    if (cursor) url = url + '?next_cursor=' + encodeURIComponent(cursor);
+    console.log('Fetching meetings page ' + page + '...');
+    var callsRes = await fetch(url, { headers: headers });
+    var callsData = await callsRes.json();
+    var items = Array.isArray(callsData) ? callsData : (callsData.items || callsData.meetings || callsData.data || callsData.recordings || []);
+    allCalls = allCalls.concat(items);
+    console.log('  Got ' + items.length + ' meetings (total so far: ' + allCalls.length + ')');
+
+    // Check for next page
+    cursor = callsData.next_cursor || callsData.nextCursor || null;
+    if (!cursor || items.length === 0) break;
+    page++;
+  }
+
+  console.log('Total meetings found: ' + allCalls.length);
+
+  var successCount = 0;
+  var skipCount = 0;
+  var errorCount = 0;
+
+  for (var c = 0; c < allCalls.length; c++) {
+    var call = allCalls[c];
     try {
-        console.log('Testing embedding...');
-        console.log('OpenAI key set:', !!config.openai.apiKey);
-        console.log('OpenAI key length:', (config.openai.apiKey||'').length);
-        console.log('Embedding model:', config.openai.embeddingModel);
-        const emb = await generateEmbedding('Hello world test');
-        console.log('Embedding result type:', typeof emb);
-        console.log('Embedding length:', emb ? emb.length : 'null');
-        res.json({ success: true, embeddingLength: emb ? emb.length : 0, first5: emb ? emb.slice(0,5) : null });
-    } catch (err) {
-        console.error('Embedding test failed:', err.message, err.stack);
-        res.json({ success: false, error: err.message, stack: err.stack });
-    }
-});
+      var callId = call.recording_id || call.id || call.call_id;
+      console.log('(' + (c + 1) + '/' + allCalls.length + ') Processing: ' + (call.title || callId));
+      var txUrl = FATHOM_BASE + '/recordings/' + callId + '/transcript';
+      var txRes = await fetch(txUrl, { headers: headers });
+      var txText = await txRes.text();
+      var txData;
+      try { txData = JSON.parse(txText); } catch(e) { txData = txText; }
 
-// Test Supabase insert
-app.get('/test-supabase', async (req, res) => {
-    try {
-        const { data, error } = await supabase.from('meetings').select('id, title, fathom_call_id').limit(5);
-        if (error) return res.json({ success: false, error: error.message });
-        res.json({ success: true, meetings: data });
-    } catch (err) {
-        res.json({ success: false, error: err.message });
-    }
-});
+      var transcript = '';
+      if (typeof txData === 'string') transcript = txData;
+      else if (txData.transcript) transcript = typeof txData.transcript === 'string' ? txData.transcript : JSON.stringify(txData.transcript);
+      else if (txData.text) transcript = txData.text;
+      else if (Array.isArray(txData)) transcript = txData.map(function(s) { return (s.speaker || 'Speaker') + ': ' + (s.text || s.content || ''); }).join('\n');
+      else transcript = JSON.stringify(txData);
 
-// Debug: raw Fathom API response
-app.get('/test-api', async (req, res) => {
-    try {
-      const FATHOM_BASE = 'https://api.fathom.ai/external/v1';
-      const hdrs = { 'X-Api-Key': config.fathom.apiKey };
-      const r = await fetch(FATHOM_BASE + '/meetings', { headers: hdrs });
-      const body = await r.json();
-      res.json({ httpStatus: r.status, apiKeySet: !!config.fathom.apiKey, keyLen: (config.fathom.apiKey||'').length, responseKeys: Object.keys(body), itemsCount: body.items ? body.items.length : 'no items key', firstItem: body.items && body.items[0] ? body.items[0] : null, raw: body });
-    } catch (err) {
-      res.json({ error: err.message });
-    }
-});
+      console.log('  Transcript: ' + transcript.length + ' chars');
 
-// Backfill endpoint with better error logging
-app.get('/backfill', async (req, res) => {
-    res.json({ status: 'Backfill started - check Railway logs for progress' });
-    try {
-      // First clean up any NULL fathom_call_id rows
-      const { error: cleanErr } = await supabase.from('meetings').delete().is('fathom_call_id', null);
-      if (cleanErr) console.error('Cleanup error:', cleanErr.message);
-      else console.log('Cleaned up NULL fathom_call_id rows');
-
-      const FATHOM_BASE = 'https://api.fathom.ai/external/v1';
-      const headers = { 'X-Api-Key': config.fathom.apiKey, 'Content-Type': 'application/json' };
-      console.log('Fetching all meetings from Fathom...');
-      const callsRes = await fetch(FATHOM_BASE + '/meetings', { headers });
-      const callsData = await callsRes.json();
-      const calls = Array.isArray(callsData) ? callsData : (callsData.items || callsData.meetings || callsData.data || callsData.recordings || []);
-      console.log('Found ' + calls.length + ' meetings');
-
-      for (const call of calls) {
-        try {
-          const callId = call.recording_id || call.id || call.call_id;
-          console.log('Processing: ' + (call.title || callId));
-          const txUrl = FATHOM_BASE + '/recordings/' + callId + '/transcript';
-          console.log('Fetching transcript from:', txUrl);
-          const txRes = await fetch(txUrl, { headers });
-          const txText = await txRes.text();
-          let txData;
-          try { txData = JSON.parse(txText); } catch(e) { txData = txText; }
-
-          let transcript = '';
-          if (typeof txData === 'string') transcript = txData;
-          else if (txData.transcript) transcript = typeof txData.transcript === 'string' ? txData.transcript : JSON.stringify(txData.transcript);
-          else if (txData.text) transcript = txData.text;
-          else if (Array.isArray(txData)) transcript = txData.map(function(s) { return (s.speaker || 'Speaker') + ': ' + (s.text || s.content || ''); }).join('\n');
-          else transcript = JSON.stringify(txData);
-
-          console.log('  Transcript length: ' + transcript.length + ' chars');
-
-          if (transcript.length < 50) {
-            console.log('  Skipping (transcript too short)');
-            continue;
-          }
-
-          console.log('  Calling ingestMeeting...');
-          await ingestMeeting({
-            fathomCallId: callId,
-            title: call.title || 'Untitled Meeting',
-            date: call.started_at || call.date || call.created_at || new Date().toISOString(),
-            transcript: transcript,
-            summary: call.summary || '',
-            attendees: call.attendees || [],
-            durationSeconds: call.duration || call.duration_seconds || 0,
-          });
-
-          console.log('  Done with: ' + (call.title || callId));
-          await new Promise(function(r) { setTimeout(r, 500); });
-        } catch (err) {
-          console.error('  ERROR processing call:', err.message);
-          console.error('  Stack:', err.stack);
-        }
+      if (transcript.length < 50) {
+        console.log('  Skipping (too short)');
+        skipCount++;
+        continue;
       }
-      console.log('Backfill complete!');
+
+      await ingestMeeting({
+        fathomCallId: callId,
+        title: call.title || 'Untitled Meeting',
+        date: call.started_at || call.date || call.created_at || new Date().toISOString(),
+        transcript: transcript,
+        summary: call.summary || '',
+        attendees: call.attendees || [],
+        durationSeconds: call.duration || call.duration_seconds || 0,
+      });
+
+      // Free memory
+      transcript = null;
+      txData = null;
+      txText = null;
+
+      successCount++;
+      console.log('  Done (' + successCount + ' completed)');
+
+      // Brief pause between meetings
+      await new Promise(function(r) { setTimeout(r, 300); });
     } catch (err) {
-      console.error('Backfill failed:', err.message);
-      console.error('Stack:', err.stack);
+      errorCount++;
+      console.error('  ERROR: ' + err.message);
+    }
+  }
+
+  console.log('=== BACKFILL COMPLETE ===');
+  console.log('  Success: ' + successCount);
+  console.log('  Skipped: ' + skipCount);
+  console.log('  Errors: ' + errorCount);
+  console.log('  Total: ' + allCalls.length);
+}
+
+// Backfill endpoint
+app.get('/backfill', async (req, res) => {
+    if (!BACKFILL_MODE) {
+      res.json({ error: 'Set BACKFILL_MODE=1 in Railway env vars and redeploy first. This disables the Slack bot to free memory for processing.' });
+      return;
+    }
+    res.json({ status: 'Backfill started - check Railway logs' });
+    await runBackfill();
+});
+
+app.listen(PORT, async function() {
+    console.log('Fathom Brain running on port ' + PORT);
+    console.log('Mode: ' + (BACKFILL_MODE ? 'BACKFILL (Slack bot disabled to save memory)' : 'NORMAL'));
+
+    if (BACKFILL_MODE) {
+      // Auto-run backfill after brief delay, no Slack bot
+      console.log('Auto-starting backfill in 3 seconds...');
+      setTimeout(async function() {
+        try {
+          await runBackfill();
+          console.log('Done! Remove BACKFILL_MODE env var and redeploy to resume Slack bot.');
+        } catch (err) {
+          console.error('Backfill failed:', err.message);
+        }
+      }, 3000);
+    } else {
+      // Normal mode — load Slack bot
+      try {
+        var { createWebhookRouter } = await import('./src/webhook.js');
+        app.use('/webhook', createWebhookRouter());
+        var { startSlackBot } = await import('./src/slack-bot.js');
+        startSlackBot();
+      } catch (err) {
+        console.error('Slack bot failed to start:', err.message);
+      }
     }
 });
-
-app.listen(config.server.port, function() {
-    console.log('Fathom Brain running on port ' + config.server.port);
-});
-
-startSlackBot();
