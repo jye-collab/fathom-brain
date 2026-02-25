@@ -22,8 +22,9 @@ app.get('/backfill', async (req, res) => {
       console.log('Fetching all meetings from Fathom...');
           const callsRes = await fetch(`${FATHOM_BASE}/meetings`, { headers });
           const callsData = await callsRes.json();
-          const calls = callsData.meetings || callsData.data || callsData || [];
-          console.log(`Found ${calls.length} calls`);
+          const calls = Array.isArray(callsData) ? callsData : (callsData.meetings || callsData.data || callsData.recordings || []);
+          console.log('API response keys:', Object.keys(callsData));
+        console.log(`Found ${calls.length} meetings`);
 
       for (const call of calls) {
               try {
@@ -68,7 +69,7 @@ app.get('/backfill', async (req, res) => {
 });
 
 app.listen(config.server.port, () => {
-          console.log(`\nð§  Fathom Brain running on port ${config.server.port}`);
+          console.log(`\nÃ°ÂÂ§Â  Fathom Brain running on port ${config.server.port}`);
     console.log(`   Backfill: http://localhost:${config.server.port}/backfill\n`);
                   });
 
