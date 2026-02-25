@@ -1,3 +1,20 @@
+// === CRASH HANDLERS — must be first ===
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err.message);
+  console.error(err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION:', reason);
+});
+process.on('SIGTERM', () => {
+  console.error('>>> RECEIVED SIGTERM — Railway is restarting this container (new deploy or health check)');
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  console.error('>>> RECEIVED SIGINT');
+  process.exit(0);
+});
+
 import express from 'express';
 import { startSlackBot } from './src/slack-bot.js';
 import { createWebhookRouter } from './src/webhook.js';
@@ -12,6 +29,11 @@ app.use('/webhook', createWebhookRouter());
 
 app.get('/', (req, res) => {
     res.json({ name: 'Fathom Brain', status: 'running' });
+});
+
+// Health check for Railway
+app.get('/health', (req, res) => {
+    res.json({ ok: true });
 });
 
 // Test OpenAI embedding
