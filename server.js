@@ -41,11 +41,15 @@ app.get('/backfill', async (req, res) => {
 
       for (const call of calls) {
               try {
-                        const callId = call.id || call.call_id;
+          const callId = call.recording_id || call.id || call.call_id;
                         console.log(`Processing: ${call.title || callId}`);
 
-                const txRes = await fetch(`${FATHOM_BASE}/recordings/${callId}/transcript`, { headers });
-                        const txData = await txRes.json();
+                const txUrl = `${FATHOM_BASE}/recordings/${callId}/transcript`;
+          console.log('Fetching transcript from:', txUrl);
+          const txRes = await fetch(txUrl, { headers });
+                        const txText = await txRes.text();
+          let txData;
+          try { txData = JSON.parse(txText); } catch(e) { txData = txText; }
 
                 let transcript = '';
                         if (typeof txData === 'string') transcript = txData;
