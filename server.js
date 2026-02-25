@@ -12,7 +12,20 @@ app.get('/', (req, res) => {
     res.json({ name: 'Fathom Brain', status: 'running' });
 });
 
-// Backfill endpoint - loads all Fathom recordings into the brain
+// Debug: raw Fathom API response
+  app.get('/test-api', async (req, res) => {
+    try {
+      const FATHOM_BASE = 'https://api.fathom.ai/external/v1';
+      const hdrs = { 'X-Api-Key': config.fathom.apiKey };
+      const r = await fetch(FATHOM_BASE + '/meetings', { headers: hdrs });
+      const body = await r.json();
+      res.json({ httpStatus: r.status, apiKeySet: !!config.fathom.apiKey, keyLen: (config.fathom.apiKey||'').length, responseKeys: Object.keys(body), itemsCount: body.items ? body.items.length : 'no items key', firstItem: body.items && body.items[0] ? body.items[0] : null, raw: body });
+    } catch (err) {
+      res.json({ error: err.message });
+    }
+  });
+
+  // Backfill endpoint - loads all Fathom recordings into the brain
 app.get('/backfill', async (req, res) => {
     res.json({ status: 'Backfill started - check Railway logs for progress' });
     try {
