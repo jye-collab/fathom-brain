@@ -40,13 +40,19 @@ export function chunkTranscript(transcript, meetingTitle, meetingDate) {
  * Helper: wrap a promise with a timeout
  */
 function withTimeout(promise, ms, label) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout after ${ms}ms: ${label}`)), ms)
-    ),
-  ]);
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Timeout after ${ms}ms: ${label}`)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
 }
+```
+
+Then click the green **"Commit changes..."** button at top right, add a message like "fix timeout cleanup", and commit.
+
+Wait about 60 seconds for Railway to redeploy, then go to:
+```
+https://web-production-93158.up.railway.app/backfill
 
 /**
  * Ingest a single meeting transcript into the database.
