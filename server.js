@@ -16,13 +16,13 @@ app.get('/', (req, res) => {
 app.get('/backfill', async (req, res) => {
     res.json({ status: 'Backfill started - check Railway logs for progress' });
     try {
-          const FATHOM_BASE = 'https://api.fathom.video/v1';
-          const headers = { Authorization: `Bearer ${config.fathom.apiKey}`, 'Content-Type': 'application/json' };
+          const FATHOM_BASE = 'https://api.fathom.ai/external/v1';
+          const headers = { 'X-Api-Key': config.fathom.apiKey, 'Content-Type': 'application/json' };
 
-      console.log('Fetching all calls from Fathom...');
-          const callsRes = await fetch(`${FATHOM_BASE}/calls`, { headers });
+      console.log('Fetching all meetings from Fathom...');
+          const callsRes = await fetch(`${FATHOM_BASE}/meetings`, { headers });
           const callsData = await callsRes.json();
-          const calls = callsData.calls || callsData.data || callsData || [];
+          const calls = callsData.meetings || callsData.data || callsData || [];
           console.log(`Found ${calls.length} calls`);
 
       for (const call of calls) {
@@ -30,7 +30,7 @@ app.get('/backfill', async (req, res) => {
                         const callId = call.id || call.call_id;
                         console.log(`Processing: ${call.title || callId}`);
 
-                const txRes = await fetch(`${FATHOM_BASE}/calls/${callId}/transcript`, { headers });
+                const txRes = await fetch(`${FATHOM_BASE}/recordings/${callId}/transcript`, { headers });
                         const txData = await txRes.json();
 
                 let transcript = '';
@@ -68,7 +68,7 @@ app.get('/backfill', async (req, res) => {
 });
 
 app.listen(config.server.port, () => {
-          console.log(`\n🧠 Fathom Brain running on port ${config.server.port}`);
+          console.log(`\nð§  Fathom Brain running on port ${config.server.port}`);
     console.log(`   Backfill: http://localhost:${config.server.port}/backfill\n`);
                   });
 
