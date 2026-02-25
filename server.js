@@ -32,7 +32,6 @@ async function runBackfill() {
   var { supabase } = await import('./src/supabase.js');
   var { ingestMeeting } = await import('./src/ingest.js');
 
-  // Clean up NULL rows
   var { error: cleanErr } = await supabase.from('meetings').delete().is('fathom_call_id', null);
   if (cleanErr) console.error('Cleanup error:', cleanErr.message);
   else console.log('Cleaned up NULL fathom_call_id rows');
@@ -40,95 +39,108 @@ async function runBackfill() {
   var FATHOM_BASE = 'https://api.fathom.ai/external/v1';
   var headers = { 'X-Api-Key': config.fathom.apiKey, 'Content-Type': 'application/json' };
 
-  // Fetch ALL meetings with pagination
-  var allCalls = [];
   var cursor = null;
   var page = 1;
-  while (true) {
-    var url = FATHOM_BASE + '/meetings';
-    if (cursor) url = url + '?next_cursor=' + encodeURIComponent(cursor);
-    console.log('Fetching meetings page ' + page + '...');
-    var callsRes = await fetch(url, { headers: headers });
-    var callsData = await callsRes.json();
-    var items = Array.isArray(callsData) ? callsData : (callsData.items || callsData.meetings || callsData.data || callsData.recordings || []);
-    allCalls = allCalls.concat(items);
-    console.log('  Got ' + items.length + ' meetings (total so far: ' + allCalls.length + ')');
-
-    // Check for next page
-    cursor = callsData.next_cursor || callsData.nextCursor || null;
-    if (!cursor || items.length === 0) break;
-    page++;
-  }
-
-  console.log('Total meetings found: ' + allCalls.length);
-
   var successCount = 0;
   var skipCount = 0;
   var errorCount = 0;
+  var totalProcessed = 0;
 
-  for (var c = 0; c < allCalls.length; c++) {
-    var call = allCalls[c];
+  while (true) {
+    var url = FATHOM_BASE + '/meetings';
+    if (cursor) url = url + '?next_cursor=' + encodeURIComponent(cursor);
+
+    console.log('--- Fetching page ' + page + ' ---');
+
+    var items = [];
+    var nextCursor = null;
+
     try {
-      var callId = call.recording_id || call.id || call.call_id;
-      console.log('(' + (c + 1) + '/' + allCalls.length + ') Processing: ' + (call.title || callId));
-      var txUrl = FATHOM_BASE + '/recordings/' + callId + '/transcript';
-      var txRes = await fetch(txUrl, { headers: headers });
-      var txText = await txRes.text();
-      var txData;
-      try { txData = JSON.parse(txText); } catch(e) { txData = txText; }
-
-      var transcript = '';
-      if (typeof txData === 'string') transcript = txData;
-      else if (txData.transcript) transcript = typeof txData.transcript === 'string' ? txData.transcript : JSON.stringify(txData.transcript);
-      else if (txData.text) transcript = txData.text;
-      else if (Array.isArray(txData)) transcript = txData.map(function(s) { return (s.speaker || 'Speaker') + ': ' + (s.text || s.content || ''); }).join('\n');
-      else transcript = JSON.stringify(txData);
-
-      console.log('  Transcript: ' + transcript.length + ' chars');
-
-      if (transcript.length < 50) {
-        console.log('  Skipping (too short)');
-        skipCount++;
-        continue;
-      }
-
-      await ingestMeeting({
-        fathomCallId: callId,
-        title: call.title || 'Untitled Meeting',
-        date: call.started_at || call.date || call.created_at || new Date().toISOString(),
-        transcript: transcript,
-        summary: call.summary || '',
-        attendees: call.attendees || [],
-        durationSeconds: call.duration || call.duration_seconds || 0,
-      });
-
-      // Free memory
-      transcript = null;
-      txData = null;
-      txText = null;
-
-      successCount++;
-      console.log('  Done (' + successCount + ' completed)');
-
-      // Brief pause between meetings
-      await new Promise(function(r) { setTimeout(r, 300); });
-    } catch (err) {
-      errorCount++;
-      console.error('  ERROR: ' + err.message);
+      var callsRes = await fetch(url, { headers: headers });
+      var rawText = await callsRes.text();
+      var callsData = JSON.parse(rawText);
+      items = Array.isArray(callsData) ? callsData : (callsData.items || callsData.meetings || callsData.data || callsData.recordings || []);
+      nextCursor = callsData.next_cursor || callsData.nextCursor || null;
+    } catch (fetchErr) {
+      console.error('Failed to fetch page ' + page + ': ' + fetchErr.message);
+      break;
     }
+
+    console.log('Got ' + items.length + ' meetings on this page');
+    if (items.length === 0) break;
+
+    // Process this page immediately
+    for (var c = 0; c < items.length; c++) {
+      var call = items[c];
+      totalProcessed++;
+      try {
+        var callId = call.recording_id || call.id || call.call_id;
+        console.log('(' + totalProcessed + ') ' + (call.title || callId));
+
+        var txUrl = FATHOM_BASE + '/recordings/' + callId + '/transcript';
+        var txRes = await fetch(txUrl, { headers: headers });
+        var txText = await txRes.text();
+        var txData;
+        try { txData = JSON.parse(txText); } catch(e) { txData = txText; }
+
+        var transcript = '';
+        if (typeof txData === 'string') transcript = txData;
+        else if (txData.transcript) transcript = typeof txData.transcript === 'string' ? txData.transcript : JSON.stringify(txData.transcript);
+        else if (txData.text) transcript = txData.text;
+        else if (Array.isArray(txData)) transcript = txData.map(function(s) { return (s.speaker || 'Speaker') + ': ' + (s.text || s.content || ''); }).join('\n');
+        else transcript = JSON.stringify(txData);
+
+        if (transcript.length < 50) {
+          console.log('  Skip (too short: ' + transcript.length + ' chars)');
+          skipCount++;
+          continue;
+        }
+
+        console.log('  ' + transcript.length + ' chars, ingesting...');
+
+        await ingestMeeting({
+          fathomCallId: callId,
+          title: call.title || 'Untitled Meeting',
+          date: call.started_at || call.date || call.created_at || new Date().toISOString(),
+          transcript: transcript,
+          summary: call.summary || '',
+          attendees: call.attendees || [],
+          durationSeconds: call.duration || call.duration_seconds || 0,
+        });
+
+        transcript = null;
+        txData = null;
+        txText = null;
+
+        successCount++;
+        console.log('  OK (' + successCount + ' done)');
+
+        await new Promise(function(r) { setTimeout(r, 300); });
+      } catch (err) {
+        errorCount++;
+        console.error('  ERROR: ' + err.message);
+      }
+    }
+
+    // Move to next page
+    cursor = nextCursor;
+    if (!cursor) {
+      console.log('No more pages.');
+      break;
+    }
+    page++;
   }
 
   console.log('=== BACKFILL COMPLETE ===');
   console.log('  Success: ' + successCount);
   console.log('  Skipped: ' + skipCount);
   console.log('  Errors: ' + errorCount);
-  console.log('  Total: ' + allCalls.length);
+  console.log('  Total: ' + totalProcessed);
 }
 
-// Backfill endpoint
 app.get('/backfill', async (req, res) => {
     if (!BACKFILL_MODE) {
-      res.json({ error: 'Set BACKFILL_MODE=1 in Railway env vars and redeploy first. This disables the Slack bot to free memory for processing.' });
+      res.json({ error: 'Set BACKFILL_MODE=1 in Railway env vars and redeploy first.' });
       return;
     }
     res.json({ status: 'Backfill started - check Railway logs' });
@@ -137,21 +149,19 @@ app.get('/backfill', async (req, res) => {
 
 app.listen(PORT, async function() {
     console.log('Fathom Brain running on port ' + PORT);
-    console.log('Mode: ' + (BACKFILL_MODE ? 'BACKFILL (Slack bot disabled to save memory)' : 'NORMAL'));
+    console.log('Mode: ' + (BACKFILL_MODE ? 'BACKFILL (Slack bot disabled)' : 'NORMAL'));
 
     if (BACKFILL_MODE) {
-      // Auto-run backfill after brief delay, no Slack bot
       console.log('Auto-starting backfill in 3 seconds...');
       setTimeout(async function() {
         try {
           await runBackfill();
-          console.log('Done! Remove BACKFILL_MODE env var and redeploy to resume Slack bot.');
+          console.log('Done! Remove BACKFILL_MODE env var and redeploy for normal Slack bot.');
         } catch (err) {
           console.error('Backfill failed:', err.message);
         }
       }, 3000);
     } else {
-      // Normal mode — load Slack bot
       try {
         var { createWebhookRouter } = await import('./src/webhook.js');
         app.use('/webhook', createWebhookRouter());
