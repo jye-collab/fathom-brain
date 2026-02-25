@@ -2,12 +2,9 @@ import { supabase } from './supabase.js';
 import { generateEmbeddings } from './embeddings.js';
 import { config } from './config.js';
 
-/**
- * Split a transcript into overlapping chunks for better retrieval.
- */
 export function chunkTranscript(transcript, meetingTitle, meetingDate) {
   const { maxChunkChars, overlapChars } = config.chunking;
-  const contextPrefix = `[Meeting: "${meetingTitle}" on ${meetingDate}]\n\n`;
+  const contextPrefix = '[Meeting: "' + meetingTitle + '" on ' + meetingDate + ']\n\n';
   const chunks = [];
   let start = 0;
 
@@ -36,20 +33,6 @@ export function chunkTranscript(transcript, meetingTitle, meetingDate) {
   return chunks;
 }
 
-/**
- * Helper: wrap a promise with a timeout
- */
-function withTimeout(promise, ms, label) {
-  let timer;
-  const timeoutPromise = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Timeout after ${ms}ms: ${label}`)), ms);
-  });
-  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
-}
-
-/**
- * Ingest a single meeting transcript into the database.
- */
 export async function ingestMeeting({
   fathomCallId,
   title,
@@ -59,129 +42,77 @@ export async function ingestMeeting({
   summary = '',
   transcript,
 }) {
-  console.log(`Ingesting meeting: "${title}" (${fathomCallId || 'manual'})`);
+  console.log('Ingesting meeting: ' + title + ' (' + (fathomCallId || 'manual') + ')');
 
-  // 1. Upsert meeting record WITHOUT full_transcript first (small payload)
-  console.log('  Step 1: Upserting meeting metadata...');
-  const { error: upsertError } = await withTimeout(
-    supabase
-      .from('meetings')
-      .upsert(
-        {
-          fathom_call_id: fathomCallId,
-          title,
-          date,
-          duration_seconds: durationSeconds,
-          attendees,
-          summary,
-          full_transcript: '',
-        },
-        { onConflict: 'fathom_call_id' }
-      ),
-    15000,
-    'upsert meeting'
-  );
+  try {
+    console.log('  Step 1: Upserting meeting metadata...');
+    var r1 = await supabase.from('meetings').upsert({
+      fathom_call_id: fathomCallId,
+      title: title,
+      date: date,
+      duration_seconds: durationSeconds,
+      attendees: attendees,
+      summary: summary,
+      full_transcript: '',
+    }, { onConflict: 'fathom_call_id' });
+    if (r1.error) throw new Error('Upsert failed: ' + r1.error.message);
+    console.log('  Step 1 done.');
 
-  if (upsertError) {
-    throw new Error(`Failed to upsert meeting: ${upsertError.message}`);
-  }
-  console.log('  Step 1 done.');
+    console.log('  Step 2: Fetching meeting ID...');
+    var r2 = await supabase.from('meetings').select('id').eq('fathom_call_id', fathomCallId).single();
+    if (r2.error || !r2.data) throw new Error('Fetch failed: ' + (r2.error ? r2.error.message : 'not found'));
+    var meetingId = r2.data.id;
+    console.log('  Step 2 done. ID: ' + meetingId);
 
-  // 2. Fetch the meeting ID
-  console.log('  Step 2: Fetching meeting ID...');
-  const { data: meeting, error: fetchError } = await withTimeout(
-    supabase
-      .from('meetings')
-      .select('id')
-      .eq('fathom_call_id', fathomCallId)
-      .single(),
-    10000,
-    'fetch meeting'
-  );
+    console.log('  Step 3: Storing transcript (' + transcript.length + ' chars)...');
+    var r3 = await supabase.from('meetings').update({ full_transcript: transcript }).eq('id', meetingId);
+    if (r3.error) console.log('  Step 3 warning: ' + r3.error.message);
+    else console.log('  Step 3 done.');
 
-  if (fetchError || !meeting) {
-    throw new Error(`Failed to fetch meeting: ${fetchError ? fetchError.message : 'not found'}`);
-  }
-  console.log(`  Step 2 done. Meeting ID: ${meeting.id}`);
+    console.log('  Step 4: Deleting old chunks...');
+    await supabase.from('chunks').delete().eq('meeting_id', meetingId);
+    console.log('  Step 4 done.');
 
-  // 3. Update transcript separately (large payload, no .select())
-  console.log(`  Step 3: Storing transcript (${transcript.length} chars)...`);
-  const { error: txError } = await withTimeout(
-    supabase
-      .from('meetings')
-      .update({ full_transcript: transcript })
-      .eq('id', meeting.id),
-    30000,
-    'update transcript'
-  );
+    console.log('  Step 5: Chunking transcript...');
+    var dateStr = new Date(date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+    var chunks = chunkTranscript(transcript, title, dateStr);
+    console.log('  Step 5 done. ' + chunks.length + ' chunks');
 
-  if (txError) {
-    console.error(`  Warning: transcript storage failed: ${txError.message}`);
-    // Continue anyway - chunks are what matter for RAG
-  } else {
-    console.log('  Step 3 done.');
-  }
-
-  // 4. Delete existing chunks
-  console.log('  Step 4: Deleting old chunks...');
-  await withTimeout(
-    supabase.from('chunks').delete().eq('meeting_id', meeting.id),
-    10000,
-    'delete chunks'
-  );
-  console.log('  Step 4 done.');
-
-  // 5. Chunk the transcript
-  const dateStr = new Date(date).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-  const chunks = chunkTranscript(transcript, title, dateStr);
-  console.log(`  Step 5: Split into ${chunks.length} chunks`);
-
-  // 6. Generate embeddings in batches of 20
-  const batchSize = 20;
-  const allChunkRecords = [];
-
-  for (let i = 0; i < chunks.length; i += batchSize) {
-    const batch = chunks.slice(i, i + batchSize);
-    const texts = batch.map((c) => c.content);
-
-    console.log(`  Step 6: Embedding batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(chunks.length / batchSize)}...`);
-    const embeddings = await withTimeout(
-      generateEmbeddings(texts),
-      60000,
-      `embed batch ${Math.floor(i / batchSize) + 1}`
-    );
-
-    for (let j = 0; j < batch.length; j++) {
-      allChunkRecords.push({
-        meeting_id: meeting.id,
-        chunk_index: batch[j].index,
-        content: batch[j].content,
-        token_count: Math.ceil(batch[j].content.length / 4),
-        embedding: embeddings[j],
-      });
+    console.log('  Step 6: Generating embeddings...');
+    var batchSize = 20;
+    var allChunkRecords = [];
+    for (var i = 0; i < chunks.length; i += batchSize) {
+      var batch = chunks.slice(i, i + batchSize);
+      var texts = batch.map(function(c) { return c.content; });
+      var batchNum = Math.floor(i / batchSize) + 1;
+      var totalBatches = Math.ceil(chunks.length / batchSize);
+      console.log('    Embedding batch ' + batchNum + '/' + totalBatches + '...');
+      var embeddings = await generateEmbeddings(texts);
+      for (var j = 0; j < batch.length; j++) {
+        allChunkRecords.push({
+          meeting_id: meetingId,
+          chunk_index: batch[j].index,
+          content: batch[j].content,
+          token_count: Math.ceil(batch[j].content.length / 4),
+          embedding: embeddings[j],
+        });
+      }
     }
-  }
+    console.log('  Step 6 done.');
 
-  // 7. Insert chunks in batches to avoid huge payloads
-  console.log(`  Step 7: Inserting ${allChunkRecords.length} chunks...`);
-  const insertBatch = 10;
-  for (let i = 0; i < allChunkRecords.length; i += insertBatch) {
-    const batch = allChunkRecords.slice(i, i + insertBatch);
-    const { error: chunksError } = await withTimeout(
-      supabase.from('chunks').insert(batch),
-      30000,
-      `insert chunks batch ${Math.floor(i / insertBatch) + 1}`
-    );
-
-    if (chunksError) {
-      throw new Error(`Failed to insert chunks batch: ${chunksError.message}`);
+    console.log('  Step 7: Inserting ' + allChunkRecords.length + ' chunks...');
+    for (var k = 0; k < allChunkRecords.length; k += 10) {
+      var insertBatch = allChunkRecords.slice(k, k + 10);
+      var r7 = await supabase.from('chunks').insert(insertBatch);
+      if (r7.error) throw new Error('Insert chunks failed: ' + r7.error.message);
     }
-  }
+    console.log('  Step 7 done.');
 
-  console.log(`  Done! ${chunks.length} chunks stored for "${title}"`);
-  return meeting;
+    console.log('  COMPLETE: ' + chunks.length + ' chunks stored for ' + title);
+    return { id: meetingId };
+  } catch (err) {
+    console.error('  INGEST ERROR: ' + err.message);
+    console.error('  Stack: ' + err.stack);
+    throw err;
+  }
 }
