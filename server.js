@@ -22,7 +22,7 @@ app.get('/backfill', async (req, res) => {
       console.log('Fetching all meetings from Fathom...');
           const callsRes = await fetch(`${FATHOM_BASE}/meetings`, { headers });
           const callsData = await callsRes.json();
-          const calls = Array.isArray(callsData) ? callsData : (callsData.meetings || callsData.data || callsData.recordings || []);
+          const calls = Array.isArray(callsData) ? callsData : (callsData.items || callsData.meetings || callsData.data || callsData.recordings || []);
           console.log('API response keys:', Object.keys(callsData));
         console.log(`Found ${calls.length} meetings`);
 
