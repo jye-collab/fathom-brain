@@ -172,7 +172,12 @@ async function runBackfill() {
           } else end = transcript.length;
 
           var chunkContent = prefix + transcript.slice(pos, end).trim();
-          pos = end - overlap;
+          // If this chunk reaches the end, don't subtract overlap — avoids infinite loop
+                    if (end >= transcript.length) {
+                                  pos = transcript.length;
+                    } else {
+                                  pos = end - overlap;
+                    }
 
           if (chunkContent.length <= prefix.length + 10) {
             if (pos >= transcript.length) break;
