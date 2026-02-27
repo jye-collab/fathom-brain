@@ -1,4 +1,4 @@
-// === CRASH HANDLERS === 
+// === CRASH HANDLERS ===
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err.message);
   console.error(err.stack);
@@ -37,6 +37,7 @@ async function getEmbedding(text, apiKey) {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
+    signal: AbortSignal.timeout(30000),
   });
   if (!r.ok) {
     var errText = await r.text();
@@ -70,7 +71,7 @@ async function runBackfill() {
 
     var items, nextCursor;
     try {
-      var res = await fetch(url, { headers: fathomHeaders });
+      var res = await fetch(url, { headers: fathomHeaders, signal: AbortSignal.timeout(30000) });
       var raw = await res.text();
       var parsed = JSON.parse(raw);
       items = Array.isArray(parsed) ? parsed : (parsed.items || parsed.meetings || parsed.data || parsed.recordings || []);
@@ -93,7 +94,8 @@ async function runBackfill() {
         console.log('(' + total + ') ' + (call.title || callId));
 
         // Get transcript
-        var txRes = await fetch(FATHOM_BASE + '/recordings/' + callId + '/transcript', { headers: fathomHeaders });
+        console.log('  fetching transcript...');
+        var txRes = await fetch(FATHOM_BASE + '/recordings/' + callId + '/transcript', { headers: fathomHeaders, signal: AbortSignal.timeout(30000) });
         var txRaw = await txRes.text();
         var txData;
         try { txData = JSON.parse(txRaw); } catch (e) { txData = txRaw; }
