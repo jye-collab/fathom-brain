@@ -31,7 +31,7 @@ function memMB() {
   return 'heap=' + Math.round(m.heapUsed / 1048576) + 'MB rss=' + Math.round(m.rss / 1048576) + 'MB';
 }
 
-// Direct OpenAI call with fetch — no SDK needed, saves ~50MB RAM
+// Direct OpenAI call with fetch â no SDK needed, saves ~50MB RAM
 async function getEmbedding(text, apiKey) {
   var r = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
@@ -50,7 +50,7 @@ async function getEmbedding(text, apiKey) {
 }
 
 async function runBackfill() {
-  // Only import config + supabase — NO openai SDK, NO ingest.js
+  // Only import config + supabase â NO openai SDK, NO ingest.js
   var { config } = await import('./src/config.js');
   var { supabase } = await import('./src/supabase.js');
 
@@ -103,9 +103,30 @@ async function runBackfill() {
 
         var transcript = '';
         if (typeof txData === 'string') transcript = txData;
-        else if (txData.transcript) transcript = typeof txData.transcript === 'string' ? txData.transcript : JSON.stringify(txData.transcript);
+        else if (txData.transcript) {
+          if (typeof txData.transcript === 'string') {
+            transcript = txData.transcript;
+          } else if (Array.isArray(txData.transcript)) {
+            // Fathom returns array of {speaker: {display_name, ...}, text: "..."}
+            transcript = txData.transcript.map(function (s) {
+              var name = '';
+              if (typeof s.speaker === 'string') name = s.speaker;
+              else if (s.speaker && s.speaker.display_name) name = s.speaker.display_name;
+              else if (s.speaker && s.speaker.name) name = s.speaker.name;
+              return (name ? name + ': ' : '') + (s.text || s.content || '');
+            }).join('\n');
+          } else {
+            transcript = JSON.stringify(txData.transcript);
+          }
+        }
         else if (txData.text) transcript = txData.text;
-        else if (Array.isArray(txData)) transcript = txData.map(function (s) { return (s.speaker || '') + ': ' + (s.text || s.content || ''); }).join('\n');
+        else if (Array.isArray(txData)) transcript = txData.map(function (s) {
+          var name = '';
+          if (typeof s.speaker === 'string') name = s.speaker;
+          else if (s.speaker && s.speaker.display_name) name = s.speaker.display_name;
+          else if (s.speaker && s.speaker.name) name = s.speaker.name;
+          return (name ? name + ': ' : '') + (s.text || s.content || '');
+        }).join('\n');
         else transcript = JSON.stringify(txData);
         txData = null;
 
@@ -178,7 +199,7 @@ async function runBackfill() {
 
         transcript = null;
         ok++;
-        console.log('  OK — ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
+        console.log('  OK â ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
 
         await new Promise(function (r) { setTimeout(r, 300); });
       } catch (err) {
@@ -203,7 +224,7 @@ app.get('/backfill', async (req, res) => {
 });
 
 app.listen(PORT, async function () {
-  console.log('Fathom Brain on port ' + PORT + ' — ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
+  console.log('Fathom Brain on port ' + PORT + ' â ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
 
   if (BACKFILL_MODE) {
     console.log('Starting backfill in 3s...');
