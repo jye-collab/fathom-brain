@@ -1,4 +1,4 @@
-// === CRASH HANDLERS — must be first ===
+// === CRASH HANDLERS ===
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err.message);
   console.error(err.stack);
@@ -7,7 +7,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('UNHANDLED REJECTION:', reason);
 });
 process.on('SIGTERM', () => {
-  console.error('>>> RECEIVED SIGTERM — Railway is restarting this container');
+  console.error('>>> RECEIVED SIGTERM');
   process.exit(0);
 });
 
@@ -20,155 +20,203 @@ var app = express();
 app.use(express.json({ limit: '10mb' }));
 
 app.get('/', (req, res) => {
-    res.json({ name: 'Fathom Brain', status: 'running', mode: BACKFILL_MODE ? 'backfill' : 'normal' });
+  res.json({ name: 'Fathom Brain', status: 'running', mode: BACKFILL_MODE ? 'backfill' : 'normal' });
+});
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
 });
 
-app.get('/health', (req, res) => {
-    res.json({ ok: true });
-});
+function memMB() {
+  var m = process.memoryUsage();
+  return 'heap=' + Math.round(m.heapUsed / 1048576) + 'MB rss=' + Math.round(m.rss / 1048576) + 'MB';
+}
+
+// Direct OpenAI call with fetch — no SDK needed, saves ~50MB RAM
+async function getEmbedding(text, apiKey) {
+  var r = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'text-embedding-3-small', input: text }),
+  });
+  if (!r.ok) {
+    var errText = await r.text();
+    throw new Error('Embed API ' + r.status + ': ' + errText.slice(0, 200));
+  }
+  var json = await r.json();
+  var vec = json.data[0].embedding;
+  json = null;
+  return vec;
+}
 
 async function runBackfill() {
+  // Only import config + supabase — NO openai SDK, NO ingest.js
   var { config } = await import('./src/config.js');
   var { supabase } = await import('./src/supabase.js');
-  var { ingestMeeting } = await import('./src/ingest.js');
 
-  var { error: cleanErr } = await supabase.from('meetings').delete().is('fathom_call_id', null);
-  if (cleanErr) console.error('Cleanup error:', cleanErr.message);
-  else console.log('Cleaned up NULL fathom_call_id rows');
+  console.log('Backfill starting. ' + memMB());
 
+  var OPENAI_KEY = config.openai.apiKey;
   var FATHOM_BASE = 'https://api.fathom.ai/external/v1';
-  var headers = { 'X-Api-Key': config.fathom.apiKey, 'Content-Type': 'application/json' };
+  var fathomHeaders = { 'X-Api-Key': config.fathom.apiKey, 'Content-Type': 'application/json' };
 
-  var cursor = null;
-  var page = 1;
-  var successCount = 0;
-  var skipCount = 0;
-  var errorCount = 0;
-  var totalProcessed = 0;
+  await supabase.from('meetings').delete().is('fathom_call_id', null);
+
+  var cursor = null, page = 1;
+  var ok = 0, skip = 0, fail = 0, total = 0;
 
   while (true) {
-    var url = FATHOM_BASE + '/meetings';
-    if (cursor) url = url + '?next_cursor=' + encodeURIComponent(cursor);
+    var url = FATHOM_BASE + '/meetings' + (cursor ? '?next_cursor=' + encodeURIComponent(cursor) : '');
+    console.log('--- Page ' + page + ' --- ' + memMB());
 
-    console.log('--- Fetching page ' + page + ' ---');
-
-    var items = [];
-    var nextCursor = null;
-
+    var items, nextCursor;
     try {
-      var callsRes = await fetch(url, { headers: headers });
-      var rawText = await callsRes.text();
-      var callsData = JSON.parse(rawText);
-      items = Array.isArray(callsData) ? callsData : (callsData.items || callsData.meetings || callsData.data || callsData.recordings || []);
-      nextCursor = callsData.next_cursor || callsData.nextCursor || null;
-    } catch (fetchErr) {
-      console.error('Failed to fetch page ' + page + ': ' + fetchErr.message);
+      var res = await fetch(url, { headers: fathomHeaders });
+      var raw = await res.text();
+      var parsed = JSON.parse(raw);
+      items = Array.isArray(parsed) ? parsed : (parsed.items || parsed.meetings || parsed.data || parsed.recordings || []);
+      nextCursor = parsed.next_cursor || parsed.nextCursor || null;
+      raw = null; parsed = null;
+    } catch (e) {
+      console.error('Page fetch error: ' + e.message);
       break;
     }
 
-    console.log('Got ' + items.length + ' meetings on this page');
-    if (items.length === 0) break;
+    if (!items.length) break;
+    console.log(items.length + ' items');
 
-    // Process this page immediately
     for (var c = 0; c < items.length; c++) {
       var call = items[c];
-      totalProcessed++;
-      try {
-        var callId = call.recording_id || call.id || call.call_id;
-        console.log('(' + totalProcessed + ') ' + (call.title || callId));
+      total++;
+      var callId = call.recording_id || call.id || call.call_id;
 
-        var txUrl = FATHOM_BASE + '/recordings/' + callId + '/transcript';
-        var txRes = await fetch(txUrl, { headers: headers });
-        var txText = await txRes.text();
+      try {
+        console.log('(' + total + ') ' + (call.title || callId));
+
+        // Get transcript
+        var txRes = await fetch(FATHOM_BASE + '/recordings/' + callId + '/transcript', { headers: fathomHeaders });
+        var txRaw = await txRes.text();
         var txData;
-        try { txData = JSON.parse(txText); } catch(e) { txData = txText; }
+        try { txData = JSON.parse(txRaw); } catch (e) { txData = txRaw; }
+        txRaw = null;
 
         var transcript = '';
         if (typeof txData === 'string') transcript = txData;
         else if (txData.transcript) transcript = typeof txData.transcript === 'string' ? txData.transcript : JSON.stringify(txData.transcript);
         else if (txData.text) transcript = txData.text;
-        else if (Array.isArray(txData)) transcript = txData.map(function(s) { return (s.speaker || 'Speaker') + ': ' + (s.text || s.content || ''); }).join('\n');
+        else if (Array.isArray(txData)) transcript = txData.map(function (s) { return (s.speaker || '') + ': ' + (s.text || s.content || ''); }).join('\n');
         else transcript = JSON.stringify(txData);
+        txData = null;
 
         if (transcript.length < 50) {
-          console.log('  Skip (too short: ' + transcript.length + ' chars)');
-          skipCount++;
+          console.log('  skip (' + transcript.length + ' chars)');
+          skip++;
+          transcript = null;
           continue;
         }
 
-        console.log('  ' + transcript.length + ' chars, ingesting...');
-
-        await ingestMeeting({
-          fathomCallId: callId,
-          title: call.title || 'Untitled Meeting',
+        // Upsert meeting
+        var r1 = await supabase.from('meetings').upsert({
+          fathom_call_id: callId,
+          title: call.title || 'Untitled',
           date: call.started_at || call.date || call.created_at || new Date().toISOString(),
-          transcript: transcript,
-          summary: call.summary || '',
+          duration_seconds: call.duration || call.duration_seconds || 0,
           attendees: call.attendees || [],
-          durationSeconds: call.duration || call.duration_seconds || 0,
-        });
+          summary: call.summary || '',
+          full_transcript: transcript,
+        }, { onConflict: 'fathom_call_id' });
+        if (r1.error) throw new Error('Upsert: ' + r1.error.message);
+
+        // Get meeting ID
+        var r2 = await supabase.from('meetings').select('id').eq('fathom_call_id', callId).single();
+        if (r2.error) throw new Error('Select: ' + r2.error.message);
+        var meetingId = r2.data.id;
+
+        // Delete old chunks
+        await supabase.from('chunks').delete().eq('meeting_id', meetingId);
+
+        // Chunk + embed + insert inline (no array, no extra imports)
+        var dateStr = new Date(call.started_at || call.date || call.created_at || Date.now())
+          .toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        var prefix = '[Meeting: "' + (call.title || 'Untitled') + '" on ' + dateStr + ']\n\n';
+        var maxC = 2000, overlap = 200;
+        var pos = 0, chunkIdx = 0;
+
+        while (pos < transcript.length) {
+          var end = pos + maxC;
+          if (end < transcript.length) {
+            var bp = Math.max(transcript.lastIndexOf('. ', end), transcript.lastIndexOf('\n', end));
+            if (bp > pos + maxC * 0.5) end = bp + 1;
+          } else end = transcript.length;
+
+          var chunkContent = prefix + transcript.slice(pos, end).trim();
+          pos = end - overlap;
+
+          if (chunkContent.length <= prefix.length + 10) {
+            if (pos >= transcript.length) break;
+            continue;
+          }
+
+          var embedding = await getEmbedding(chunkContent, OPENAI_KEY);
+
+          var ri = await supabase.from('chunks').insert({
+            meeting_id: meetingId,
+            chunk_index: chunkIdx,
+            content: chunkContent,
+            token_count: Math.ceil(chunkContent.length / 4),
+            embedding: embedding,
+          });
+          if (ri.error) throw new Error('Chunk ' + chunkIdx + ': ' + ri.error.message);
+
+          embedding = null;
+          chunkContent = null;
+          chunkIdx++;
+
+          if (pos >= transcript.length) break;
+        }
 
         transcript = null;
-        txData = null;
-        txText = null;
+        ok++;
+        console.log('  OK — ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
 
-        successCount++;
-        console.log('  OK (' + successCount + ' done)');
-
-        await new Promise(function(r) { setTimeout(r, 300); });
+        await new Promise(function (r) { setTimeout(r, 300); });
       } catch (err) {
-        errorCount++;
-        console.error('  ERROR: ' + err.message);
+        fail++;
+        console.error('  ERR: ' + err.message);
       }
     }
 
-    // Move to next page
+    items = null;
     cursor = nextCursor;
-    if (!cursor) {
-      console.log('No more pages.');
-      break;
-    }
+    if (!cursor) { console.log('No more pages.'); break; }
     page++;
   }
 
-  console.log('=== BACKFILL COMPLETE ===');
-  console.log('  Success: ' + successCount);
-  console.log('  Skipped: ' + skipCount);
-  console.log('  Errors: ' + errorCount);
-  console.log('  Total: ' + totalProcessed);
+  console.log('=== DONE === ok=' + ok + ' skip=' + skip + ' fail=' + fail + ' total=' + total);
 }
 
 app.get('/backfill', async (req, res) => {
-    if (!BACKFILL_MODE) {
-      res.json({ error: 'Set BACKFILL_MODE=1 in Railway env vars and redeploy first.' });
-      return;
-    }
-    res.json({ status: 'Backfill started - check Railway logs' });
-    await runBackfill();
+  if (!BACKFILL_MODE) return res.json({ error: 'Set BACKFILL_MODE=1 first' });
+  res.json({ status: 'Backfill started' });
+  await runBackfill();
 });
 
-app.listen(PORT, async function() {
-    console.log('Fathom Brain running on port ' + PORT);
-    console.log('Mode: ' + (BACKFILL_MODE ? 'BACKFILL (Slack bot disabled)' : 'NORMAL'));
+app.listen(PORT, async function () {
+  console.log('Fathom Brain on port ' + PORT + ' — ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
 
-    if (BACKFILL_MODE) {
-      console.log('Auto-starting backfill in 3 seconds...');
-      setTimeout(async function() {
-        try {
-          await runBackfill();
-          console.log('Done! Remove BACKFILL_MODE env var and redeploy for normal Slack bot.');
-        } catch (err) {
-          console.error('Backfill failed:', err.message);
-        }
-      }, 3000);
-    } else {
-      try {
-        var { createWebhookRouter } = await import('./src/webhook.js');
-        app.use('/webhook', createWebhookRouter());
-        var { startSlackBot } = await import('./src/slack-bot.js');
-        startSlackBot();
-      } catch (err) {
-        console.error('Slack bot failed to start:', err.message);
-      }
+  if (BACKFILL_MODE) {
+    console.log('Starting backfill in 3s...');
+    setTimeout(async function () {
+      try { await runBackfill(); }
+      catch (err) { console.error('Backfill failed:', err.message); }
+    }, 3000);
+  } else {
+    try {
+      var { createWebhookRouter } = await import('./src/webhook.js');
+      app.use('/webhook', createWebhookRouter());
+      var { startSlackBot } = await import('./src/slack-bot.js');
+      startSlackBot();
+    } catch (err) {
+      console.error('Slack bot failed:', err.message);
     }
+  }
 });
