@@ -31,7 +31,7 @@ function memMB() {
   return 'heap=' + Math.round(m.heapUsed / 1048576) + 'MB rss=' + Math.round(m.rss / 1048576) + 'MB';
 }
 
-// Direct OpenAI call with fetch â no SDK needed, saves ~50MB RAM
+// Direct OpenAI call with fetch — no SDK needed, saves ~50MB RAM
 async function getEmbedding(text, apiKey) {
   var r = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
@@ -50,7 +50,7 @@ async function getEmbedding(text, apiKey) {
 }
 
 async function runBackfill() {
-  // Only import config + supabase â NO openai SDK, NO ingest.js
+  // Only import config + supabase — NO openai SDK, NO ingest.js
   var { config } = await import('./src/config.js');
   var { supabase } = await import('./src/supabase.js');
 
@@ -64,9 +64,10 @@ async function runBackfill() {
 
   var cursor = null, page = 1;
   var ok = 0, skip = 0, fail = 0, total = 0;
+  var seenIds = new Set();
 
   while (true) {
-    var url = FATHOM_BASE + '/meetings' + (cursor ? '?next_cursor=' + encodeURIComponent(cursor) : '');
+    var url = FATHOM_BASE + '/meetings' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : '');
     console.log('--- Page ' + page + ' --- ' + memMB());
 
     var items, nextCursor;
@@ -85,10 +86,19 @@ async function runBackfill() {
     if (!items.length) break;
     console.log(items.length + ' items');
 
+    var dupsOnPage = 0;
     for (var c = 0; c < items.length; c++) {
       var call = items[c];
       total++;
       var callId = call.recording_id || call.id || call.call_id;
+
+      // Dedup: skip if we've already processed this meeting
+      if (seenIds.has(callId)) {
+        dupsOnPage++;
+        console.log('(' + total + ') SKIP DUP: ' + (call.title || callId));
+        continue;
+      }
+      seenIds.add(callId);
 
       try {
         console.log('(' + total + ') ' + (call.title || callId));
@@ -173,11 +183,11 @@ async function runBackfill() {
 
           var chunkContent = prefix + transcript.slice(pos, end).trim();
           // If this chunk reaches the end, don't subtract overlap — avoids infinite loop
-                    if (end >= transcript.length) {
-                                  pos = transcript.length;
-                    } else {
-                                  pos = end - overlap;
-                    }
+          if (end >= transcript.length) {
+            pos = transcript.length;
+          } else {
+            pos = end - overlap;
+          }
 
           if (chunkContent.length <= prefix.length + 10) {
             if (pos >= transcript.length) break;
@@ -204,7 +214,7 @@ async function runBackfill() {
 
         transcript = null;
         ok++;
-        console.log('  OK â ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
+        console.log('  OK — ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
 
         await new Promise(function (r) { setTimeout(r, 300); });
       } catch (err) {
@@ -213,7 +223,17 @@ async function runBackfill() {
       }
     }
 
+    var pageSize = items.length;
     items = null;
+    var newOnPage = pageSize - dupsOnPage;
+    console.log('Page ' + page + ': ' + newOnPage + ' new, ' + dupsOnPage + ' dups');
+
+    // Safety: if entire page was duplicates, API is cycling — stop
+    if (newOnPage === 0) {
+      console.log('Full page of duplicates — API is cycling. Stopping.');
+      break;
+    }
+
     cursor = nextCursor;
     if (!cursor) { console.log('No more pages.'); break; }
     page++;
@@ -229,7 +249,7 @@ app.get('/backfill', async (req, res) => {
 });
 
 app.listen(PORT, async function () {
-  console.log('Fathom Brain on port ' + PORT + ' â ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
+  console.log('Fathom Brain on port ' + PORT + ' — ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
 
   if (BACKFILL_MODE) {
     console.log('Starting backfill in 3s...');
