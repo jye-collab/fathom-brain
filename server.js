@@ -248,6 +248,18 @@ app.get('/backfill', async (req, res) => {
   await runBackfill();
 });
 
+// --- Self-improvement endpoint (trigger manually or via cron) ---
+app.get('/self-improve', async (req, res) => {
+  res.json({ status: 'Self-improvement cycle started' });
+  try {
+    var { runSelfImprovement } = await import('./src/soul.js');
+    await runSelfImprovement();
+    console.log('[self-improve] Manual trigger complete.');
+  } catch (err) {
+    console.error('[self-improve] Error:', err.message);
+  }
+});
+
 app.listen(PORT, async function () {
   console.log('Fathom Brain on port ' + PORT + ' — ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
 
@@ -263,6 +275,32 @@ app.listen(PORT, async function () {
       app.use('/webhook', createWebhookRouter());
       var { startSlackBot } = await import('./src/slack-bot.js');
       startSlackBot();
+
+      // --- Self-improvement loop: every 48 hours ---
+      var SELF_IMPROVE_INTERVAL = 48 * 60 * 60 * 1000; // 48 hours in ms
+      console.log('🧠 Self-improvement loop: every 48 hours');
+
+      // Run first self-improvement 60 seconds after startup
+      setTimeout(async function () {
+        try {
+          var { runSelfImprovement } = await import('./src/soul.js');
+          await runSelfImprovement();
+        } catch (err) {
+          console.error('[self-improve] Startup run error:', err.message);
+        }
+      }, 60000);
+
+      // Then every 48 hours
+      setInterval(async function () {
+        try {
+          console.log('[self-improve] Running scheduled self-improvement...');
+          var { runSelfImprovement } = await import('./src/soul.js');
+          await runSelfImprovement();
+        } catch (err) {
+          console.error('[self-improve] Scheduled run error:', err.message);
+        }
+      }, SELF_IMPROVE_INTERVAL);
+
     } catch (err) {
       console.error('Slack bot failed:', err.message);
     }
