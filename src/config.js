@@ -22,6 +22,10 @@ export const config = {
     appToken: process.env.SLACK_APP_TOKEN,
     signingSecret: process.env.SLACK_SIGNING_SECRET,
   },
+  tella: {
+    apiKey: process.env.TELLA_API_KEY,
+    baseUrl: 'https://api.tella.com/v1',
+  },
   webhook: {
     secret: process.env.WEBHOOK_SECRET,
   },
