@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { supabase } from './supabase.js';
 import { generateEmbedding } from './embeddings.js';
 import { config } from './config.js';
+import { buildSoulPrompt } from './soul.js';
 
 const anthropic = new Anthropic({ apiKey: config.anthropic.apiKey });
 
@@ -67,7 +68,7 @@ export async function queryBrain(question) {
   if (results.length === 0) {
     return {
       answer:
-        "I couldn't find anything relevant in your meeting recordings for that question. Try rephrasing, or this might be a topic that hasn't come up in your calls yet.",
+        "Couldn't find anything relevant in your meeting recordings for that question. Try rephrasing, or this might be a topic that hasn't come up in your calls yet.",
       sources: [],
       meetingCount: stats.totalMeetings,
     };
@@ -75,7 +76,7 @@ export async function queryBrain(question) {
 
   // 2. Build the context from search results
   const contextChunks = results.map((r, i) => {
-    const date = new Date(r.meeting_date).toLocaleDateString('en-US', {
+    const date = new Date(r.meeting_date).toLocaleDateString('en-AU', {
       year: 'numeric',
       month: 'short',
       day: 'numeric',
@@ -85,30 +86,28 @@ export async function queryBrain(question) {
 
   const context = contextChunks.join('\n\n');
 
-  // 3. Build the system prompt
-  const systemPrompt = `You are Jye's personal knowledge assistant — a "second brain" built from all of Jye's meeting recordings and calls.
+  // 3. Load the soul (base identity + brain context + dynamic learnings)
+  const soul = await buildSoulPrompt();
 
-YOUR ROLE:
-- Answer questions based ONLY on what Jye has actually said, discussed, or expressed in meetings
-- Synthesize insights across multiple conversations when relevant
-- Speak as if you deeply understand Jye's thinking, opinions, and business context
-- If the context doesn't contain enough info, say so honestly — never make things up
+  // 4. Build the system prompt with soul + meeting context
+  const systemPrompt = `${soul}
 
-YOUR KNOWLEDGE BASE:
-- ${stats.totalMeetings} total meetings indexed
-- You have access to relevant excerpts from these meetings below
+# Current Query Context
 
-GUIDELINES:
-- Reference specific meetings/dates when possible ("In your call on Jan 15th, you mentioned...")
-- When asked about opinions or preferences, quote or paraphrase what Jye actually said
-- When asked to create content (lead magnets, posts, etc.), base it on actual themes and language from the meetings
-- Be direct and actionable — Jye doesn't want fluff
-- If asked something that's not in the meeting data, clearly state that and offer to help differently
+KNOWLEDGE BASE: ${stats.totalMeetings} total meetings indexed.
 
-MEETING CONTEXT:
-${context}`;
+RELEVANT MEETING EXCERPTS:
+${context}
 
-  // 4. Ask Claude
+RESPONSE FORMAT:
+- Use Slack-compatible formatting: *bold* for emphasis (not **bold**), _italic_ for meeting titles
+- Use bullet points with • or -
+- Do NOT use markdown headers (## or ###) — use *bold text* on its own line instead
+- Keep responses focused and under 2500 characters when possible
+- Reference specific meetings and dates
+- If the context doesn't contain enough info, say so honestly — never fabricate`;
+
+  // 5. Ask Claude
   const message = await anthropic.messages.create({
     model: config.anthropic.model,
     max_tokens: 2048,
@@ -118,7 +117,7 @@ ${context}`;
 
   const answer = message.content[0].text;
 
-  // 5. Deduplicate sources
+  // 6. Deduplicate sources
   const sourceMap = new Map();
   for (const r of results) {
     if (!sourceMap.has(r.meeting_id)) {
