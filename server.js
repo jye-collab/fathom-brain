@@ -31,7 +31,7 @@ function memMB() {
   return 'heap=' + Math.round(m.heapUsed / 1048576) + 'MB rss=' + Math.round(m.rss / 1048576) + 'MB';
 }
 
-// Direct OpenAI call with fetch â no SDK needed, saves ~50MB RAM
+// Direct OpenAI call with fetch — no SDK needed, saves ~50MB RAM
 async function getEmbedding(text, apiKey) {
   var r = await fetch('https://api.openai.com/v1/embeddings', {
     method: 'POST',
@@ -50,7 +50,7 @@ async function getEmbedding(text, apiKey) {
 }
 
 async function runBackfill() {
-  // Only import config + supabase â NO openai SDK, NO ingest.js
+  // Only import config + supabase — NO openai SDK, NO ingest.js
   var { config } = await import('./src/config.js');
   var { supabase } = await import('./src/supabase.js');
 
@@ -182,7 +182,7 @@ async function runBackfill() {
           } else end = transcript.length;
 
           var chunkContent = prefix + transcript.slice(pos, end).trim();
-          // If this chunk reaches the end, don't subtract overlap â avoids infinite loop
+          // If this chunk reaches the end, don't subtract overlap — avoids infinite loop
           if (end >= transcript.length) {
             pos = transcript.length;
           } else {
@@ -214,7 +214,7 @@ async function runBackfill() {
 
         transcript = null;
         ok++;
-        console.log('  OK â ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
+        console.log('  OK — ' + chunkIdx + ' chunks (' + ok + ' total) ' + memMB());
 
         await new Promise(function (r) { setTimeout(r, 300); });
       } catch (err) {
@@ -228,9 +228,9 @@ async function runBackfill() {
     var newOnPage = pageSize - dupsOnPage;
     console.log('Page ' + page + ': ' + newOnPage + ' new, ' + dupsOnPage + ' dups');
 
-    // Safety: if entire page was duplicates, API is cycling â stop
+    // Safety: if entire page was duplicates, API is cycling — stop
     if (newOnPage === 0) {
-      console.log('Full page of duplicates â API is cycling. Stopping.');
+      console.log('Full page of duplicates — API is cycling. Stopping.');
       break;
     }
 
@@ -248,15 +248,52 @@ app.get('/backfill', async (req, res) => {
   await runBackfill();
 });
 
+// --- Tella debug endpoint (see what API returns) ---
+app.get('/debug/tella', async (req, res) => {
+  try {
+    var { config } = await import('./src/config.js');
+    var key = config.tella.apiKey;
+    if (!key) return res.json({ error: 'TELLA_API_KEY not set' });
+
+    var r = await fetch('https://api.tella.com/v1/videos?limit=3', {
+      headers: { 'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(15000),
+    });
+    var text = await r.text();
+    var status = r.status;
+
+    var parsed;
+    try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+
+    if (parsed && parsed.data) {
+      // Show structure of first video (redact long fields)
+      var sample = parsed.data[0];
+      if (sample && sample.transcript) {
+        sample._transcriptKeys = Object.keys(sample.transcript);
+        sample._transcriptType = typeof sample.transcript;
+        if (sample.transcript.sentences) sample._sentenceCount = sample.transcript.sentences.length;
+        if (sample.transcript.text) sample._textLen = sample.transcript.text.length;
+      }
+      res.json({ status: status, videoCount: parsed.data.length, sampleKeys: sample ? Object.keys(sample) : [], sample: sample, pagination: { cursor: parsed.cursor || parsed.next_cursor || null } });
+    } else {
+      res.json({ status: status, raw: text.slice(0, 2000) });
+    }
+  } catch (err) {
+    res.json({ error: err.message, stack: err.stack?.slice(0, 500) });
+  }
+});
+
 // --- Tella ingestion endpoint ---
 app.get('/ingest/tella', async (req, res) => {
-  res.json({ status: 'Tella ingestion started' });
   try {
     var { ingestTella } = await import('./src/tella.js');
+    // Don't respond immediately — wait for result so we can return errors
     var result = await ingestTella();
     console.log('[tella] Ingestion complete:', JSON.stringify(result));
+    res.json({ status: 'done', result: result });
   } catch (err) {
-    console.error('[tella] Ingestion error:', err.message);
+    console.error('[tella] Ingestion error:', err.message, err.stack);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -273,7 +310,7 @@ app.get('/self-improve', async (req, res) => {
 });
 
 app.listen(PORT, async function () {
-  console.log('Fathom Brain on port ' + PORT + ' â ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
+  console.log('Fathom Brain on port ' + PORT + ' — ' + (BACKFILL_MODE ? 'BACKFILL' : 'NORMAL'));
 
   if (BACKFILL_MODE) {
     console.log('Starting backfill in 3s...');
@@ -290,7 +327,7 @@ app.listen(PORT, async function () {
 
       // --- Self-improvement loop: every 48 hours ---
       var SELF_IMPROVE_INTERVAL = 48 * 60 * 60 * 1000; // 48 hours in ms
-      console.log('ð§  Self-improvement loop: every 48 hours');
+      console.log('🧠 Self-improvement loop: every 48 hours');
 
       // Run first self-improvement 60 seconds after startup
       setTimeout(async function () {
